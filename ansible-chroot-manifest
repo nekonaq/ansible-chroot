@@ -1,0 +1,48 @@
+#!/bin/sh
+set -e
+prog="${0##*/}"
+
+usage() {
+  cat <<EOF
+Usage: $prog [OPTION...] TARGET_HOST
+
+ansible inventory で定義した chroot 環境 TARGET_HOST について
+filesystem.manifest を取得する。
+
+Options:
+   -h, --help        このヘルプを表示する。
+
+EOF
+}
+
+main() {
+  ARGS=$( getopt --name "$prog" --long help --options h -- "$@" )
+  if [ $? -ne 0 ]; then
+    echo "$prog: invalid parameter (use -h for help)" >&2
+    exit 2
+  fi
+  eval set -- $ARGS
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        usage
+        return
+        ;;
+      --)
+        shift
+        break
+        ;;
+    esac
+    shift
+  done
+
+  local target_host="${1:?too few parameters}"
+  shift
+
+  ( set -x
+    ansible-chroot "$target_host" -- dpkg-query -W --showformat='${{Package}} ${{Version}}\n'
+  )
+}
+
+main "$@"
