@@ -37,6 +37,11 @@ class Command(CommandBase):
             metavar="INVENTORY",
         )
         parser.add_argument(
+            '--target-suffix', '-S', action='store',
+            help="ターゲットのサフィックスを指定する",
+            metavar="SUFFIX",
+        )
+        parser.add_argument(
             '--overlay', action='store',
             help="オーバーレイマウントを行う",
             )
@@ -52,6 +57,11 @@ class Command(CommandBase):
             '--mount', '-m', action='store_const',
             dest='action', const='mount',
             help="chroot 環境に必要なファイルシステムをマウントする",
+            )
+        parser.add_argument(
+            '--mount-overlay-rw', action='store_const',
+            dest='action', const='mount-overlay-rw',
+            help="オーバーレイマウントの上位レイヤだけをマウントする",
             )
         parser.add_argument(
             '--umount', '-u', action='store_const',
@@ -86,23 +96,23 @@ class Command(CommandBase):
 
     def action__mount(self, host, target, args, overlay=None, **options):
         if overlay:
-            ovupper = '.'.join([target, 'overlay/rw'])
+            ovupper = '.'.join([target, 'overlay/upper'])
             ovwork = '.'.join([target, 'overlay/work'])
 
-            if overlay is True:
-                # target を ovlower として使う
-                ovlower = target
-            elif stat.S_ISDIR(os.stat(overlay).st_mode):
-                # overlay はディレクトリなので、そのまま ovlower として使う
-                ovlower = overlay
-            elif overlay:
-                # overlay はファイルなので、mkdir ovlower してからマウントする
-                ovlower = '.'.join([target, 'overlay/ro'])
-                self.run_command(('mkdir', '-p', ovlower))
-                self.run_command(('mount', overlay, ovlower))
+            for mp in (target, ovupper, ovwork):
+                if not os.path.exists(mp):
+                    self.run_command(('mkdir', '-p', mp))
 
-            self.run_command(('mkdir', '-p', ovupper))
-            self.run_command(('mkdir', '-p', ovwork))
+            # target を ovlower として使う
+            ovlower = target
+            if overlay is not True:
+                if stat.S_ISDIR(os.stat(overlay).st_mode):
+                    # overlay を target にマウントしてから ovlower として使う
+                    self.run_command(('mount', '--bind', overlay, target))
+                else:
+                    # overlay を target にマウントしてから ovlower として使う
+                    self.run_command(('mount', overlay, target))
+
             self.run_command((
                 'mount', '-t', 'overlay', '-o',
                 f'lowerdir={ovlower},upperdir={ovupper},workdir={ovwork}',
@@ -112,6 +122,25 @@ class Command(CommandBase):
 
         for mp in self.mount_point_list:
             self.run_command(('mount', '--bind', mp, ''.join([target, mp])))
+
+    def action__mount_overlay_rw(self, host, target, args, overlay=None, **options):
+        ovupper = '.'.join([target, 'overlay/upper'])
+        ovwork = '.'.join([target, 'overlay/work'])
+        ovempty = '.'.join([target, 'overlay/empty'])
+
+        for mp in (target, ovupper, ovwork, ovempty):
+            if not os.path.exists(mp):
+                self.run_command(('mkdir', '-p', mp))
+
+        # ovempty を ovlower として使う
+        ovlower = ovempty
+        self.run_command((
+            'mount', '-t', 'overlay', '-o',
+            f'lowerdir={ovlower},upperdir={ovupper},workdir={ovwork}',
+            'overlay',
+            target,
+        ))
+
 
     def iter_mount_point(self, host, target):
         output = subprocess.check_output(('mount',))
@@ -126,7 +155,17 @@ class Command(CommandBase):
             self.run_command(('umount', mount_point))
 
     def action__chroot(self, host, target, args, vars={}, overlay=None, local=False, **options):
-        cmdargs = tuple((el.format(host, inventory_hostname=host, **vars) for el in args))
+        cmdargs = tuple((
+            el.format(
+                host,
+                inventory_hostname=host,
+                chroot_target=target,
+                **vars
+            ) for el in args
+        ))
+
+        if not os.path.exists(target):
+            self.run_command(('mkdir', '-p', target))
 
         with save_term_mode():
             try:
@@ -152,6 +191,7 @@ class Command(CommandBase):
     actions = {
         'chroot': action__chroot,
         'mount': action__mount,
+        'mount-overlay-rw': action__mount_overlay_rw,
         'umount': action__umount,
     }
 
@@ -160,14 +200,18 @@ class Command(CommandBase):
                action=None,
                hostpat=None,
                inventory=None,
+               target_suffix=None,
                overlay=None,
                print_target=None,
                silent=False,
                dry_run=False,
                **options):
+        overlay = overlay if overlay else overlay == ''
         self.dry_run = dry_run
         self.silent = not dry_run and silent
-        ensure_root()
+
+        if not print_target:
+            ensure_root()
 
         for host, host_vars in ansible_get_host_vars(hostpat, inventory):
             # import pprint
@@ -176,14 +220,22 @@ class Command(CommandBase):
                 target = os.path.realpath(host_vars['ansible_host'])  # chroot target
             except KeyError:
                 raise CommandError(
-                    f"no variable definition for host '{host}': 'ansible_host'"
+                    f"no variable definition for host '{host}': 'ansible_host'",
                 )
 
+            target += target_suffix if target_suffix else ''
             if print_target:
                 self.stdout.write(f"{host}\t{target}\n")
                 continue
 
             overlay = overlay or host_vars.get('chroot_overlay')
-            return self.actions[action](
+            try:
+                action_method = self.actions[action]
+            except KeyError:
+                raise CommandError(
+                    f"unknown action: {action}",
+                )
+
+            return action_method(
                 self, host, target, args=args, vars=host_vars, overlay=overlay, **options
             )

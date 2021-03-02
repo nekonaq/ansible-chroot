@@ -193,4 +193,7 @@ class Command(CommandBase):
                 if options[name]:
                     params[name] = options[name]
 
+            if options.get('make_tarball') or action == 'print-debs':
+                target = '{}.debs'.format(target)
+
             return self.run_debootstrap(host, target, params, **options)
